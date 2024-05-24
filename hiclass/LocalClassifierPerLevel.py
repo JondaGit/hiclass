@@ -3,7 +3,11 @@ Local classifier per level approach.
 
 Numeric and string output labels are both handled.
 """
+
+import hashlib
+import pickle
 from copy import deepcopy
+from os.path import exists
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -48,6 +52,7 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
         replace_classifiers: bool = True,
         n_jobs: int = 1,
         bert: bool = False,
+        tmp_dir: str = None,
     ):
         """
         Initialize a local classifier per level.
@@ -71,6 +76,9 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
             If :code:`Ray` is installed it is used, otherwise it defaults to :code:`Joblib`.
         bert : bool, default=False
             If True, skip scikit-learn's checks and sample_weight passing for BERT.
+        tmp_dir : str, default=None
+            Temporary directory to persist local classifiers that are trained. If the job needs to be restarted,
+            it will skip the pre-trained local classifier found in the temporary directory.
         """
         super().__init__(
             local_classifier=local_classifier,
@@ -80,6 +88,7 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
             n_jobs=n_jobs,
             classifier_abbreviation="LCPL",
             bert=bert,
+            tmp_dir=tmp_dir,
         )
 
     def fit(self, X, y, sample_weight=None):
@@ -177,9 +186,11 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
                 np.argmax(prob) if len(prob) > 0 else None for prob in successors_prob
             ]
             y[:, level] = [
-                successors_list[index_max_probability[i]]
-                if index_max_probability[i] is not None
-                else ""
+                (
+                    successors_list[index_max_probability[i]]
+                    if index_max_probability[i] is not None
+                    else ""
+                )
                 for i, successors_list in enumerate(successors)
             ]
 
@@ -195,9 +206,11 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
 
     def _get_successors(self, level):
         successors = [
-            list(self.hierarchy_.successors(node))
-            if self.hierarchy_.has_node(node)
-            else []
+            (
+                list(self.hierarchy_.successors(node))
+                if self.hierarchy_.has_node(node)
+                else []
+            )
             for node in level
         ]
         return successors
@@ -241,7 +254,16 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
     @staticmethod
     def _fit_classifier(self, level, separator):
         classifier = self.local_classifiers_[level]
-
+        if self.tmp_dir:
+            md5 = hashlib.md5(str(level).encode("utf-8")).hexdigest()
+            filename = f"{self.tmp_dir}/{md5}.sav"
+            if exists(filename):
+                (_, classifier) = pickle.load(open(filename, "rb"))
+                self.logger_.info(
+                    f"Loaded trained model for local classifier {level} from file {filename}"
+                )
+                return classifier
+        self.logger_.info(f"Training local classifier {level}")
         X, y, sample_weight = self._remove_empty_leaves(
             separator, self.X_, self.y_[:, level], self.sample_weight_
         )
@@ -256,6 +278,7 @@ class LocalClassifierPerLevel(BaseEstimator, HierarchicalClassifier):
                 classifier.fit(X, y)
         else:
             classifier.fit(X, y)
+        self._save_tmp(level, classifier)
         return classifier
 
     @staticmethod
