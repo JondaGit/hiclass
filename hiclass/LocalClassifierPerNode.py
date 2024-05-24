@@ -3,6 +3,7 @@ Local classifier per node approach.
 
 Numeric and string output labels are both handled.
 """
+
 from copy import deepcopy
 
 import networkx as nx
@@ -252,3 +253,58 @@ class LocalClassifierPerNode(BaseEstimator, HierarchicalClassifier):
     def _clean_up(self):
         super()._clean_up()
         del self.binary_policy_
+
+    def predict_proba(self, X):
+        # Check if fit has been called
+        check_is_fitted(self)
+
+        # Input validation
+        if not self.bert:
+            X = check_array(X, accept_sparse="csr", allow_nd=True, ensure_2d=False)
+        else:
+            X = np.array(X)
+
+        # Initialize array that holds predictions
+        y = np.empty((X.shape[0], self.max_levels_), dtype=self.dtype_)
+
+        # TODO: Add threshold to stop prediction halfway if need be
+
+        bfs = nx.bfs_successors(self.hierarchy_, source=self.root_)
+
+        self.logger_.info("Predicting")
+
+        probas = []
+
+        for predecessor, successors in bfs:
+            if predecessor == self.root_:
+                mask = [True] * X.shape[0]
+                subset_x = X[mask]
+            else:
+                mask = np.isin(y, predecessor).any(axis=1)
+                subset_x = X[mask]
+            if subset_x.shape[0] > 0:
+                probabilities = np.zeros((subset_x.shape[0], len(successors)))
+                for i, successor in enumerate(successors):
+                    successor_name = str(successor).split(self.separator_)[-1]
+                    self.logger_.info(f"Predicting for node '{successor_name}'")
+                    classifier = self.hierarchy_.nodes[successor]["classifier"]
+                    positive_index = np.where(classifier.classes_ == 1)[0]
+                    probabilities[:, i] = classifier.predict_proba(subset_x)[
+                        :, positive_index
+                    ][:, 0]
+                probas.append(probabilities)
+                highest_probability = np.argmax(probabilities, axis=1)
+                prediction = []
+                for i in highest_probability:
+                    prediction.append(successors[i])
+                level = nx.shortest_path_length(
+                    self.hierarchy_, self.root_, predecessor
+                )
+                prediction = np.array(prediction)
+                y[mask, level] = prediction
+
+        y = self._convert_to_1d(y)
+
+        self._remove_separator(y)
+
+        return probas

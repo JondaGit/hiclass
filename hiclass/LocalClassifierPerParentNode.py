@@ -3,6 +3,7 @@ Local classifier per parent node approach.
 
 Numeric and string output labels are both handled.
 """
+
 from copy import deepcopy
 
 import networkx as nx
@@ -133,7 +134,13 @@ class LocalClassifierPerParentNode(BaseEstimator, HierarchicalClassifier):
 
         # Input validation
         if not self.bert:
-            X = check_array(X, accept_sparse="csr", allow_nd=True, ensure_2d=False)
+            X = check_array(
+                X,
+                accept_sparse="csr",
+                allow_nd=True,
+                ensure_2d=False,
+                force_all_finite="allow-nan",
+            )
         else:
             X = np.array(X)
 
@@ -168,6 +175,114 @@ class LocalClassifierPerParentNode(BaseEstimator, HierarchicalClassifier):
                     if len(successors) > 0:
                         classifier = self.hierarchy_.nodes[predecessor]["classifier"]
                         y[mask, level] = classifier.predict(predecessor_x).flatten()
+
+    def classes_(self):
+        """
+        Get the classes of the local classifiers.
+
+        Returns
+        -------
+        dict
+            A dictionary containing the classes of the local classifiers.
+        """
+        # Get only flat list of leaf classes
+        classes = []
+        for node in self.hierarchy_.nodes:
+            if (
+                "classifier" in self.hierarchy_.nodes[node]
+                and len(node.split("::")) == 7
+            ):
+                classes.append(self.hierarchy_.nodes[node]["classifier"].classes_)
+        return classes
+
+    def predict_proba(self, X):
+        """
+        Predict class probabilities and classes for the given data.
+
+        Hierarchical labels and probabilities are returned.
+
+        Parameters
+        ----------
+        X : {array-like, sparse matrix} of shape (n_samples, n_features)
+            The input samples. Internally, its dtype will be converted
+            to ``dtype=np.float32``. If a sparse matrix is provided, it will be
+            converted into a sparse ``csr_matrix``.
+
+        Returns
+        -------
+        y : ndarray of shape (n_samples, n_outputs)
+            The predicted classes.
+        y_proba : ndarray of shape (n_samples, n_outputs, n_classes_per_level)
+            The predicted class probabilities for each hierarchical level and each class.
+        """
+        # Check if fit has been called
+        check_is_fitted(self)
+
+        # Input validation
+        if not self.bert:
+            X = check_array(
+                X,
+                accept_sparse="csr",
+                allow_nd=True,
+                ensure_2d=False,
+                force_all_finite="allow-nan",
+            )
+        else:
+            X = np.array(X)
+
+        # Determine maximum number of classes at any level (for initialization)
+        max_classes = max(
+            len(self.hierarchy_.nodes[node]["classifier"].classes_)
+            for node in self.hierarchy_.nodes
+            if "classifier" in self.hierarchy_.nodes[node]
+        )
+
+        # Initialize arrays that hold predictions and probabilities
+        y = np.empty((X.shape[0], self.max_levels_), dtype=self.dtype_)
+        y_proba = np.zeros(
+            (X.shape[0], self.max_levels_, max_classes), dtype=np.float32
+        )
+
+        # Logging start of prediction
+        self.logger_.info("Predicting probabilities and classes")
+
+        # Predict first level
+        root_classifier = self.hierarchy_.nodes[self.root_]["classifier"]
+        y[:, 0] = root_classifier.predict(X).flatten()
+        y_proba[:, 0, : len(root_classifier.classes_)] = root_classifier.predict_proba(
+            X
+        )
+
+        # Predict remaining levels
+        self._predict_remaining_levels_proba(X, y, y_proba)
+
+        # Optionally convert y to a 1D array if appropriate
+        y = self._convert_to_1d(y)
+
+        # Optionally remove separators in predicted labels, if any
+        self._remove_separator(y)
+
+        return y, y_proba
+
+    def _predict_remaining_levels_proba(self, X, y, y_proba):
+        """
+        Helper method to predict probabilities and classes for remaining levels of the hierarchy.
+        """
+        for level in range(1, y.shape[1]):
+            predecessors = set(y[:, level - 1])
+            print(predecessors)
+            predecessors.discard("")
+            for predecessor in predecessors:
+                mask = np.isin(y[:, level - 1], predecessor)
+                predecessor_x = X[mask]
+                if predecessor_x.shape[0] > 0:
+                    successors = list(self.hierarchy_.successors(predecessor))
+                    if len(successors) > 0:
+                        classifier = self.hierarchy_.nodes[predecessor]["classifier"]
+                        y[mask, level] = classifier.predict(predecessor_x).flatten()
+                        y_proba[mask, level, : len(classifier.classes_)] = (
+                            classifier.predict_proba(predecessor_x)
+                        )
 
     def _initialize_local_classifiers(self):
         super()._initialize_local_classifiers()
@@ -223,3 +338,28 @@ class LocalClassifierPerParentNode(BaseEstimator, HierarchicalClassifier):
         self.logger_.info("Fitting local classifiers")
         nodes = self._get_parents()
         self._fit_node_classifier(nodes, local_mode, use_joblib)
+
+    def get_classifiers_info(self):
+        """
+        Retrieves the classifiers for each parent node along with a description.
+
+        Returns:
+            dict: A dictionary where keys are parent node identifiers and values
+            are tuples containing the classifier and a description of what the
+            classifier is used for.
+        """
+        if not hasattr(self, "hierarchy_"):
+            return {}
+
+        classifiers_info = {}
+        for node in self.hierarchy_.nodes:
+            # Check if the node has a classifier associated with it
+            if "classifier" in self.hierarchy_.nodes[node]:
+                # Description based on the node's position and its children
+                children = list(self.hierarchy_.successors(node))
+                description = f"Classifier for node '{node}' used to distinguish among {', '.join(children)}"
+                # Retrieve the classifier
+                classifier = self.hierarchy_.nodes[node]["classifier"]
+                classifiers_info[node] = (classifier, description)
+
+        return classifiers_info
