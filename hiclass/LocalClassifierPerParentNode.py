@@ -186,22 +186,31 @@ class LocalClassifierPerParentNode(BaseEstimator, HierarchicalClassifier):
 
     def classes_(self):
         """
-        Get the classes of the local classifiers.
+        Get the classes of the local classifiers at the leaf nodes.
 
         Returns
         -------
-        dict
-            A dictionary containing the classes of the local classifiers.
+        list
+            A list containing the classes of the local classifiers at the leaf nodes.
         """
         # Get only flat list of leaf classes
-        classes = []
-        for node in self.hierarchy_.nodes:
-            if (
-                "classifier" in self.hierarchy_.nodes[node]
-                and len(node.split("::")) == 7
-            ):
-                classes.append(self.hierarchy_.nodes[node]["classifier"].classes_)
-        return classes
+        ordered_classes = []
+
+        previous_classifiers = [self.root_]
+        for level in range(0, self.max_levels_):
+            current_classifiers = []
+            for node in previous_classifiers:
+                if "classifier" in self.hierarchy_.nodes[node]:
+                    classifier = self.hierarchy_.nodes[node]["classifier"]
+                    classes = classifier.classes_
+                    for c in classes:
+                        current_classifiers.append(c)
+                        # Check if this is a leaf node
+                        if len(c.split(self.separator_)) == self.max_levels_:
+                            ordered_classes.append(c)
+            previous_classifiers = current_classifiers
+        print("Classes_ was called!")
+        return np.array(ordered_classes)
 
     def predict_proba(self, X):
         """
@@ -238,59 +247,35 @@ class LocalClassifierPerParentNode(BaseEstimator, HierarchicalClassifier):
         else:
             X = np.array(X)
 
-        # Determine maximum number of classes at any level (for initialization)
-        max_classes = max(
-            len(self.hierarchy_.nodes[node]["classifier"].classes_)
-            for node in self.hierarchy_.nodes
-            if "classifier" in self.hierarchy_.nodes[node]
-        )
+        node_probas = {}
 
-        # Initialize arrays that hold predictions and probabilities
-        y = np.empty((X.shape[0], self.max_levels_), dtype=self.dtype_)
-        y_proba = np.zeros(
-            (X.shape[0], self.max_levels_, max_classes), dtype=np.float32
-        )
+        previous_classifiers = [self.root_]
+        for level in range(0, self.max_levels_):
+            current_classifiers = []
+            for node in previous_classifiers:
+                classifier = self.hierarchy_.nodes[node]["classifier"]
+                probas = classifier.predict_proba(X)
+                classes = classifier.classes_
+                for i, c in enumerate(classes):
+                    current_classifiers.append(c)
+                    if node != "hiclass::root":
+                        node_probas[c] = probas[:, i] * node_probas[node]
+                    else:
+                        node_probas[c] = probas[:, i]
 
-        # Logging start of prediction
-        self.logger_.info("Predicting probabilities and classes")
+            previous_classifiers = current_classifiers
 
-        # Predict first level
-        root_classifier = self.hierarchy_.nodes[self.root_]["classifier"]
-        y[:, 0] = root_classifier.predict(X).flatten()
-        y_proba[:, 0, : len(root_classifier.classes_)] = root_classifier.predict_proba(
-            X
-        )
+        # Extract probas from node_probas that have labels that are of length 3 when you split it by self.separator_
+        y = []
+        for k in node_probas.keys():
+            if len(k.split(self.separator_)) == self.max_levels_:
+                y.append(k)
 
-        # Predict remaining levels
-        self._predict_remaining_levels_proba(X, y, y_proba)
+        y_proba = np.vstack([node_probas[k] for k in y]).T
 
-        # Optionally convert y to a 1D array if appropriate
-        y = self._convert_to_1d(y)
+        print("Predict proba was called!")
 
-        # Optionally remove separators in predicted labels, if any
-        self._remove_separator(y)
-
-        return y, y_proba
-
-    def _predict_remaining_levels_proba(self, X, y, y_proba):
-        """
-        Helper method to predict probabilities and classes for remaining levels of the hierarchy.
-        """
-        for level in range(1, y.shape[1]):
-            predecessors = set(y[:, level - 1])
-            print(predecessors)
-            predecessors.discard("")
-            for predecessor in predecessors:
-                mask = np.isin(y[:, level - 1], predecessor)
-                predecessor_x = X[mask]
-                if predecessor_x.shape[0] > 0:
-                    successors = list(self.hierarchy_.successors(predecessor))
-                    if len(successors) > 0:
-                        classifier = self.hierarchy_.nodes[predecessor]["classifier"]
-                        y[mask, level] = classifier.predict(predecessor_x).flatten()
-                        y_proba[mask, level, : len(classifier.classes_)] = (
-                            classifier.predict_proba(predecessor_x)
-                        )
+        return y_proba
 
     def _initialize_local_classifiers(self):
         super()._initialize_local_classifiers()
