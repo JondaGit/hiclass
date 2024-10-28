@@ -66,7 +66,7 @@ class FlatClassifier(BaseEstimator):
         y = [self.separator_.join(i) for i in y]
 
         # Fit flat classifier
-        self.local_classifier.fit(X, y, sample_weight=sample_weight)
+        self.local_classifier.fit(X, y)
 
         # Return the classifier
         return self
